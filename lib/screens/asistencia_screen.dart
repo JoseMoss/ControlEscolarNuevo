@@ -1,36 +1,12 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
-// Modelo interno para manejar el estado del alumno en la lista
-class AlumnoAsistencia {
-  final String idAlumno;
-  final String nombreCompleto;
-  final String grupo; // Campo para identificar si pertenece al Grupo A o Grupo B
-  String estado; // 'Presente', 'Retardo', 'Falta', 'Falta Justificada'
-
-  AlumnoAsistencia({
-    required this.idAlumno,
-    required this.nombreCompleto,
-    required this.grupo,
-    this.estado = 'Presente', // Por defecto todos inician presentes
-  });
-
-  Map<String, dynamic> toJson() {
-    return {
-      'idAlumno': idAlumno,
-      'nombreCompleto': nombreCompleto,
-      'grupo': grupo,
-      'estado': estado,
-    };
-  }
-}
-
-class AsistenciaScreen extends StatefulWidget {
+class ReporteAsistenciaScreen extends StatefulWidget {
   final String materiaId;
   final String nombreMateria;
-  final String gradoMateria; // Recibe el grado para filtrar a los alumnos correctos
+  final String gradoMateria;
 
-  const AsistenciaScreen({
+  const ReporteAsistenciaScreen({
     super.key,
     required this.materiaId,
     required this.nombreMateria,
@@ -38,283 +14,422 @@ class AsistenciaScreen extends StatefulWidget {
   });
 
   @override
-  State<AsistenciaScreen> createState() => _AsistenciaScreenState();
+  State<ReporteAsistenciaScreen> createState() =>
+      _ReporteAsistenciaScreenState();
 }
 
-class _AsistenciaScreenState extends State<AsistenciaScreen> {
-  bool isLoading = true;
-  int _selectedGroupIndex = 0; // 0 para Grupo A, 1 para Grupo B
-  List<AlumnoAsistencia> todosLosAlumnos = [];
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+class _ReporteAsistenciaScreenState extends State<ReporteAsistenciaScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  final List<String> _grupos = ['A', 'B'];
+
+  DateTime _fechaSeleccionada = DateTime.now();
+  bool _cargando = true;
+
+  List<DocumentSnapshot> _alumnosGrupoA = [];
+  List<DocumentSnapshot> _alumnosGrupoB = [];
+  Map<String, String> _registrosAsistencia = {};
+  bool _existeRegistroEnFecha = false;
 
   @override
   void initState() {
     super.initState();
-    _cargarAlumnos();
+    _tabController = TabController(length: _grupos.length, vsync: this);
+    _cargarDatosCompletos(_fechaSeleccionada);
   }
 
-  // Carga todos los alumnos del grado y los clasifica por grupo
-  Future<void> _cargarAlumnos() async {
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  String _formatoFecha(DateTime fecha) {
+    return fecha.toIso8601String().split('T')[0];
+  }
+
+  Future<void> _cargarDatosCompletos(DateTime fecha) async {
+    setState(() {
+      _cargando = true;
+      _fechaSeleccionada = fecha;
+    });
+
     try {
-      QuerySnapshot querySnapshot = await _firestore
+      var snapA = await FirebaseFirestore.instance
           .collection('alumnos')
-          .where('grado', isEqualTo: widget.gradoMateria)
+          .where('grupo', isEqualTo: 'Grupo A')
           .get();
+      if (snapA.docs.isEmpty) {
+        snapA = await FirebaseFirestore.instance
+            .collection('alumnos')
+            .where('grupo', isEqualTo: 'A')
+            .get();
+      }
+      _alumnosGrupoA = snapA.docs;
 
+      var snapB = await FirebaseFirestore.instance
+          .collection('alumnos')
+          .where('grupo', isEqualTo: 'Grupo B')
+          .get();
+      if (snapB.docs.isEmpty) {
+        snapB = await FirebaseFirestore.instance
+            .collection('alumnos')
+            .where('grupo', isEqualTo: 'B')
+            .get();
+      }
+      _alumnosGrupoB = snapB.docs;
+
+      String fechaStr = _formatoFecha(fecha);
+      Map<String, String> tempRegistros = {};
+      bool anyExists = false;
+
+      for (String grupo in _grupos) {
+        String docId = '$fechaStr-Grupo $grupo';
+        var doc = await FirebaseFirestore.instance
+            .collection('materias')
+            .doc(widget.materiaId)
+            .collection('asistencias')
+            .doc(docId)
+            .get();
+
+        if (!doc.exists) {
+          docId = '$fechaStr-$grupo';
+          doc = await FirebaseFirestore.instance
+              .collection('materias')
+              .doc(widget.materiaId)
+              .collection('asistencias')
+              .doc(docId)
+              .get();
+        }
+
+        if (doc.exists) {
+          anyExists = true;
+          var data = doc.data() as Map<String, dynamic>;
+          if (data.containsKey('asistencias')) {
+            var mapAsistencias = data['asistencias'] as Map<String, dynamic>;
+            mapAsistencias.forEach((alumnoId, estado) {
+              tempRegistros[alumnoId] = estado.toString();
+            });
+          }
+        }
+      }
+
+      if (!mounted) return;
       setState(() {
-        todosLosAlumnos = querySnapshot.docs.map((doc) {
-          final data = doc.data() as Map<String, dynamic>;
-          String nombre = data['nombre'] ?? '';
-          String apellidoP = data['apellidoPaterno'] ?? '';
-          String apellidoM = data['apellidoMaterno'] ?? '';
-          String nombreCompleto = '$nombre $apellidoP $apellidoM'.trim();
-          String grupo = data['grupo'] ?? 'Grupo A';
-
-          return AlumnoAsistencia(
-            idAlumno: doc.id,
-            nombreCompleto: nombreCompleto.isEmpty ? 'Sin nombre' : nombreCompleto,
-            grupo: grupo,
-          );
-        }).toList();
-        isLoading = false;
+        _registrosAsistencia = tempRegistros;
+        _existeRegistroEnFecha = anyExists;
+        _cargando = false;
       });
     } catch (e) {
-      setState(() {
-        isLoading = false;
-      });
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Error al cargar alumnos: $e')));
+      if (!mounted) return;
+      setState(() => _cargando = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error al cargar reporte: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
-  // Guarda la asistencia general del día en Firestore para ambos grupos
-  Future<void> _guardarAsistencia() async {
-    String fechaHoy = DateTime.now().toIso8601String().split('T')[0];
-    String documentoId = '${fechaHoy}_${widget.materiaId}';
-
-    try {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const Center(child: CircularProgressIndicator()),
-      );
-
-      Map<String, dynamic> datosAsistencia = {
-        'fecha': fechaHoy,
-        'materiaId': widget.materiaId,
-        'materia': widget.nombreMateria,
-        'grado': widget.gradoMateria,
-        'timestamp': FieldValue.serverTimestamp(),
-        'registros': todosLosAlumnos.map((a) => a.toJson()).toList(),
-      };
-
-      await _firestore
-          .collection('asistencias')
-          .doc(documentoId)
-          .set(datosAsistencia);
-
-      if (mounted) {
-        Navigator.pop(context); // Quitar indicador de carga
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('¡Asistencia guardada correctamente en la nube!'),
-          ),
-        );
-        Navigator.pop(context); // Regresar a la lista de materias
-      }
-    } catch (e) {
-      if (mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Error al guardar: $e')));
-      }
+  Future<void> _seleccionarFechaCalendario(BuildContext context) async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: _fechaSeleccionada,
+      firstDate: DateTime(2025),
+      lastDate: DateTime.now(),
+    );
+    if (picked != null && picked != _fechaSeleccionada) {
+      _cargarDatosCompletos(picked);
     }
+  }
+
+  // Historial detallado por alumno consultando todas las fechas guardadas
+  Future<void> _mostrarHistorialAlumno(String alumnoId, String nombreCompleto) async {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('Historial: $nombreCompleto'),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 350,
+            child: FutureBuilder<QuerySnapshot>(
+              future: FirebaseFirestore.instance
+                  .collection('materias')
+                  .doc(widget.materiaId)
+                  .collection('asistencias')
+                  .get(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                  return const Center(child: Text('No hay registros históricos de asistencia.'));
+                }
+
+                int presentes = 0;
+                int retardos = 0;
+                int faltas = 0;
+                int justificadas = 0;
+                List<Map<String, String>> historialFechas = [];
+
+                for (var doc in snapshot.data!.docs) {
+                  var data = doc.data() as Map<String, dynamic>;
+                  String fecha = data['fecha'] ?? doc.id.split('-').first;
+                  if (data.containsKey('asistencias')) {
+                    var map = data['asistencias'] as Map<String, dynamic>;
+                    if (map.containsKey(alumnoId)) {
+                      String estado = map[alumnoId].toString();
+                      if (estado == 'P') presentes++;
+                      if (estado == 'R') retardos++;
+                      if (estado == 'F') faltas++;
+                      if (estado == 'FJ') justificadas++;
+
+                      historialFechas.add({'fecha': fecha, 'estado': estado});
+                    }
+                  }
+                }
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Card(
+                      color: Colors.blue.shade50,
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            _buildStatChip('P: $presentes', Colors.green),
+                            _buildStatChip('R: $retardos', Colors.amber.shade800),
+                            _buildStatChip('F: $faltas', Colors.red),
+                            _buildStatChip('FJ: $justificadas', Colors.blue),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const Divider(),
+                    const Text('Registros por fecha:', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: historialFechas.isEmpty
+                          ? const Center(child: Text('Sin asistencias registradas aún.'))
+                          : ListView.builder(
+                              itemCount: historialFechas.length,
+                              itemBuilder: (context, idx) {
+                                var item = historialFechas[idx];
+                                return ListTile(
+                                  dense: true,
+                                  title: Text('Fecha: ${item['fecha']}'),
+                                  trailing: Chip(
+                                    label: Text(_traducirEstado(item['estado']!)),
+                                    backgroundColor: _obtenerColorEstado(item['estado']!).withValues(alpha: 0.2),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cerrar'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildStatChip(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(label, style: TextStyle(fontWeight: FontWeight.bold, color: color)),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final grupoActual = _selectedGroupIndex == 0 ? 'Grupo A' : 'Grupo B';
-    final alumnosFiltrados = todosLosAlumnos
-        .where((a) => a.grupo.toLowerCase() == grupoActual.toLowerCase())
-        .toList();
+    String fechaTexto = _formatoFecha(_fechaSeleccionada);
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('Asistencia: ${widget.nombreMateria}'),
+        title: Text('Reporte: ${widget.nombreMateria}'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        bottom: TabBar(
+          controller: _tabController,
+          labelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+          tabs: const [
+            Tab(text: '📂 Grupo A'),
+            Tab(text: '📂 Grupo B'),
+          ],
+        ),
       ),
-      body: isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
+      body: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            color: Colors.blue.withValues(alpha: 0.1),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                // Selector de Grupos (Grupo A / Grupo B)
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 12.0,
-                    horizontal: 16.0,
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      ToggleButtons(
-                        isSelected: [
-                          _selectedGroupIndex == 0,
-                          _selectedGroupIndex == 1,
-                        ],
-                        onPressed: (index) {
-                          setState(() {
-                            _selectedGroupIndex = index;
-                          });
-                        },
-                        borderRadius: BorderRadius.circular(10.0),
-                        selectedColor: Colors.white,
-                        fillColor: Colors.indigo,
-                        color: Colors.indigo,
-                        constraints: const BoxConstraints(
-                          minHeight: 40.0,
-                          minWidth: 130.0,
-                        ),
-                        children: const [
-                          Text(
-                            'Grupo A',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                            ),
-                          ),
-                          Text(
-                            'Grupo B',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                            ),
-                          ),
-                        ],
+                Row(
+                  children: [
+                    const Icon(Icons.calendar_month, color: Colors.blue),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Fecha: $fechaTexto',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-                Expanded(
-                  child: alumnosFiltrados.isEmpty
-                      ? Center(
-                          child: Text(
-                            'No hay alumnos registrados en ${widget.gradoMateria} ($grupoActual).',
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 16, color: Colors.grey),
-                          ),
-                        )
-                      : ListView.builder(
-                          itemCount: alumnosFiltrados.length,
-                          itemBuilder: (context, index) {
-                            final alumno = alumnosFiltrados[index];
-                            return Card(
-                              margin: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 6,
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.all(8.0),
-                                child: Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        '${index + 1}. ${alumno.nombreCompleto}',
-                                        style: const TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ),
-                                    // Botones rápidos P / R / F / FJ
-                                    ToggleButtons(
-                                      isSelected: [
-                                        alumno.estado == 'Presente',
-                                        alumno.estado == 'Retardo',
-                                        alumno.estado == 'Falta',
-                                        alumno.estado == 'Falta Justificada',
-                                      ],
-                                      onPressed: (int indexButton) {
-                                        setState(() {
-                                          if (indexButton == 0) {
-                                            alumno.estado = 'Presente';
-                                          }
-                                          if (indexButton == 1) {
-                                            alumno.estado = 'Retardo';
-                                          }
-                                          if (indexButton == 2) {
-                                            alumno.estado = 'Falta';
-                                          }
-                                          if (indexButton == 3) {
-                                            alumno.estado = 'Falta Justificada';
-                                          }
-                                        });
-                                      },
-                                      color: Colors.grey,
-                                      selectedColor: Colors.white,
-                                      fillColor: _obtenerColorBoton(alumno.estado),
-                                      borderRadius: BorderRadius.circular(8),
-                                      constraints: const BoxConstraints(
-                                        minHeight: 36,
-                                        minWidth: 40,
-                                      ),
-                                      children: const [
-                                        Text(
-                                          'P',
-                                          style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                        Text(
-                                          'R',
-                                          style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                        Text(
-                                          'F',
-                                          style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                        Text(
-                                          'FJ',
-                                          style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
+                ElevatedButton.icon(
+                  onPressed: () => _seleccionarFechaCalendario(context),
+                  icon: const Icon(Icons.edit_calendar, size: 18),
+                  label: const Text('Cambiar Fecha'),
                 ),
               ],
             ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: todosLosAlumnos.isEmpty ? null : _guardarAsistencia,
-        label: const Text('Guardar Asistencia'),
-        icon: const Icon(Icons.save),
+          ),
+          Expanded(
+            child: _cargando
+                ? const Center(child: CircularProgressIndicator())
+                : !_existeRegistroEnFecha
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24.0),
+                          child: Text(
+                            'No hay pase de lista registrado para el día:\n$fechaTexto',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              color: Colors.grey,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      )
+                    : TabBarView(
+                        controller: _tabController,
+                        children: [
+                          _buildListaGrupo(_alumnosGrupoA, 'A'),
+                          _buildListaGrupo(_alumnosGrupoB, 'B'),
+                        ],
+                      ),
+          ),
+        ],
       ),
     );
   }
 
-  Color _obtenerColorBoton(String estado) {
-    switch (estado) {
-      case 'Presente':
-        return Colors.green;
-      case 'Retardo':
-        return Colors.orange;
-      case 'Falta':
-        return Colors.red;
-      case 'Falta Justificada':
-        return Colors.purple;
+  Widget _buildListaGrupo(List<DocumentSnapshot> alumnosGrupo, String grupoNombre) {
+    if (alumnosGrupo.isEmpty) {
+      return Center(
+        child: Text('No hay alumnos registrados en el Grupo $grupoNombre.'),
+      );
+    }
+
+    final listaOrdenada = List.from(alumnosGrupo);
+    listaOrdenada.sort((a, b) {
+      final dataA = a.data() as Map<String, dynamic>;
+      final dataB = b.data() as Map<String, dynamic>;
+      final nombreA = (dataA['nombre'] ?? '').toString().toLowerCase();
+      final nombreB = (dataB['nombre'] ?? '').toString().toLowerCase();
+      return nombreA.compareTo(nombreB);
+    });
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(8.0),
+      itemCount: listaOrdenada.length,
+      itemBuilder: (context, index) {
+        var alumnoDoc = listaOrdenada[index];
+        var alumnoData = alumnoDoc.data() as Map<String, dynamic>;
+        String alumnoId = alumnoDoc.id;
+
+        String nombreCompleto =
+            '${alumnoData['nombre'] ?? ''} ${alumnoData['apellidoPaterno'] ?? ''} ${alumnoData['apellidoMaterno'] ?? ''}'
+                .trim();
+
+        String codigoEstado = _registrosAsistencia[alumnoId] ?? 'Sin registro';
+        String estadoTexto = _traducirEstado(codigoEstado);
+
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: ListTile(
+            onTap: () => _mostrarHistorialAlumno(alumnoId, nombreCompleto),
+            leading: CircleAvatar(
+              backgroundColor: _obtenerColorEstado(codigoEstado)
+                  .withValues(alpha: 0.2),
+              child: Text(
+                codigoEstado == 'Sin registro' ? '?' : codigoEstado,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: codigoEstado == 'FJ' ? 10 : 14,
+                  color: _obtenerColorEstado(codigoEstado),
+                ),
+              ),
+            ),
+            title: Text(
+              '${index + 1}. ${nombreCompleto.isEmpty ? 'Sin Nombre' : nombreCompleto}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            subtitle: Text('Grupo: $grupoNombre (Toca para ver historial)'),
+            trailing: Chip(
+              label: Text(
+                estadoTexto,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+              backgroundColor: _obtenerColorEstado(codigoEstado),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  String _traducirEstado(String codigo) {
+    switch (codigo) {
+      case 'P':
+        return 'Presente';
+      case 'R':
+        return 'Retardo';
+      case 'F':
+        return 'Falta';
+      case 'FJ':
+        return 'Falta Justificada';
       default:
-        return Colors.blue;
+        return 'Sin registro';
+    }
+  }
+
+  Color _obtenerColorEstado(String codigo) {
+    switch (codigo) {
+      case 'P':
+        return Colors.green;
+      case 'R':
+        return Colors.amber.shade700;
+      case 'F':
+        return Colors.red;
+      case 'FJ':
+        return Colors.blue.shade700;
+      default:
+        return Colors.grey;
     }
   }
 }

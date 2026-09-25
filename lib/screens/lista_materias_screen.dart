@@ -7,12 +7,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 // Importamos la pantalla de actividades para conectar la navegación
 import 'package:control_escolar/screens/lista_actividades_screen.dart';
 
-// Importamos la pantalla de asistencias que acabamos de crear
-import 'package:control_escolar/screens/asistencia_screen.dart';
-
 // Importamos la pantalla del reporte mensual de asistencias
 import 'package:control_escolar/screens/reporte_asistencia_screen.dart';
 
+// Importamos la asistencia ocultando la clase repetida para evitar conflictos
+import 'package:control_escolar/screens/reporte_asistencia_screen.dart';
 /// Pantalla que muestra el listado de materias registradas en Firestore
 /// en tiempo real y permite seleccionarlas para ver sus actividades, pasar lista o ver reportes.
 class ListaMateriasScreen extends StatelessWidget {
